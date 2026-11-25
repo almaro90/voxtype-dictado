@@ -245,17 +245,22 @@ El vocabulario está en `~/.config/voxtype/vocabulary.txt`, el más nuevo primer
 ### Personalizar el normalizador (el LLM que limpia el texto)
 
 Después de transcribir, `normalize-es.sh` manda el texto a un LLM que quita muletillas, pone
-la puntuación y escribe bien los términos del vocabulario. Por defecto usa
-`openai/gpt-oss-20b` en Groq con la misma key que la transcripción. Todo se cambia con
-ficheros en `~/.config/voxtype/`, sin tocar el script. Las variables de entorno no sirven,
-porque voxtype no hereda las de tu terminal.
+la puntuación y escribe bien los términos del vocabulario.
 
-**Modelo y proveedor**: crea `~/.config/voxtype/normalize.env`. Vale cualquier API compatible
-con la de chat completions de OpenAI.
+**Configuración por defecto (recomendada)**: `openai/gpt-oss-20b` en Groq, con la misma key
+que la transcripción, que es `whisper-large-v3` también en Groq. Es rápido, gratuito con el plan
+free y funciona bien en español. Si no creas ningún fichero, se usa esto; no hace falta tocar
+nada.
+
+Si quieres cambiarlo, todo se hace con ficheros en `~/.config/voxtype/`, sin tocar el script.
+Las variables de entorno no sirven, porque voxtype no hereda las de tu terminal.
+
+**Modelo y proveedor**: crea `~/.config/voxtype/normalize.env` y descomenta solo lo que
+quieras cambiar. Vale cualquier API compatible con la de chat completions de OpenAI.
 
 ```bash
 # Otro modelo de Groq (lista en https://console.groq.com/docs/models)
-NORMALIZE_MODEL=openai/gpt-oss-120b
+# NORMALIZE_MODEL=openai/gpt-oss-120b
 
 # OpenRouter, OpenAI u otro proveedor: endpoint completo y su propia key
 # NORMALIZE_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
