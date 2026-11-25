@@ -1,0 +1,14 @@
+# Terms voxtype must spell exactly like this, newest first.
+# Feeds the Whisper initial_prompt and the LLM normalizer.
+# Managed by the dictation-vocabulary skill: voxtype-vocab add|undo|list
+# contexto: desarrollo de software
+voxtype
+Groq
+Claude
+Claude Code
+GitHub
+pull request
+commit
+merge
+deploy
+branch

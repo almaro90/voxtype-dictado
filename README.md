@@ -1,0 +1,236 @@
+# Dictado por voz en español con voxtype + Groq
+
+Dictado en cualquier app: mantienes una tecla, hablas y el texto aparece donde
+está el cursor, limpio y bien puntuado. Funciona en macOS y en Linux.
+
+```
+tecla ─► voxtype graba ─► Groq Whisper large-v3 ─► normalizador (LLM en Groq) ─► sustituciones ─► texto en el cursor
+                               ▲                          ▲                          ▲
+                               └──────── vocabulary.txt ──┴── voxtype-vocab ─────────┘
+                                         (lo amplía tu agente de IA cuando detecta una palabra mal transcrita)
+```
+
+- **Transcripción**: Whisper large-v3 en Groq, con el plan gratuito.
+- **Normalizador** (`normalize-es.sh`): un LLM en Groq quita muletillas («eh», «o sea»,
+  repeticiones), corrige puntuación y tildes, y escribe los términos de tu vocabulario como toca.
+  Si falla, voxtype escribe el texto sin limpiar.
+- **Diccionario que aprende** (`voxtype-vocab` + skill `dictation-vocabulary`): cuando tu
+  agente de IA ve que el dictado ha destrozado un nombre («lum» por Loom), lo registra sin
+  preguntarte. La próxima vez sale bien.
+
+Cada persona empieza con un vocabulario mínimo y genérico, que va creciendo con su uso.
+
+| Fichero | Qué es |
+|---|---|
+| `install.sh` | Instalador. Se puede volver a ejecutar sin problema: hace copia de `config.toml` y conserva tu vocabulario |
+| `normalize-es.sh` | Post-proceso de voxtype que limpia el texto con Groq |
+| `vocabulary.txt` | Vocabulario inicial (solo se copia si no tienes uno) |
+| `skills/dictation-vocabulary/` | Skill para tu agente y el script `voxtype-vocab` |
+| `AGENTS-snippet.md` | La regla que hay que añadir a las instrucciones globales de tu agente |
+
+> **Estado:** probado en Linux (Arch + Hyprland, voxtype 1.3.1). En **macOS está escrito para
+> funcionar, pero no se ha probado en un Mac real**. Si algo no cuadra, el agente debe mirar
+> `voxtype config schema` y la documentación de voxtype antes de improvisar.
+
+---
+
+## Para agentes de IA
+
+Si eres un agente instalando esto para tu usuario, sigue estos pasos en orden. Cada paso tiene
+un criterio de éxito: no pases al siguiente sin cumplirlo. Al terminar, haz un resumen al usuario.
+
+**Reglas**
+
+- **Nunca pidas, leas ni escribas la API key de Groq en el chat.** La persona la pega en su
+  propia terminal (paso 4).
+- No edites `~/.config/voxtype/config.toml` a mano. Usa `install.sh` o `voxtype config set`.
+  Nunca uses `voxtype config unset text.replacements.<x>`: borra todas las sustituciones.
+- Los pasos que dependen de la interfaz de macOS (asistente, permisos, tecla) no están
+  verificados. Compruébalos con `voxtype config schema` y `voxtype config get` y, si algo no
+  coincide, díselo a la persona en vez de inventar claves.
+
+**1. Clonar el repo**
+
+```bash
+git clone https://github.com/almaro90/voxtype-dictado.git ~/voxtype-dictado
+cd ~/voxtype-dictado
+```
+
+✔ Existe `~/voxtype-dictado/install.sh`.
+
+**2. Instalar voxtype y completar su asistente**
+
+- macOS 13 o superior, con [Homebrew](https://brew.sh):
+  ```bash
+  brew install --cask peteonrails/voxtype/voxtype
+  ```
+  Después pide a la persona que abra voxtype (o ejecute `voxtype configure`) y complete el
+  asistente: permisos de **Micrófono**, **Accesibilidad** y **Monitorización de entrada** en
+  Ajustes del Sistema → Privacidad y seguridad, y la tecla de dictado (por defecto FN). Si no
+  quiere usar FN, `hotkey.key` admite F13–F20 en macOS.
+- Linux: sigue https://voxtype.io (paquete de tu distro y `voxtype setup`).
+
+✔ Existe `~/.config/voxtype/config.toml` y `voxtype status` responde (por ejemplo, `idle`).
+Si la config está en `~/Library/Application Support/voxtype`, avisa a la persona: las
+versiones actuales usan `~/.config/voxtype`.
+
+**3. Ejecutar el instalador**
+
+```bash
+./install.sh
+```
+
+Instala `jq` y un Python 3.11 o superior si faltan (en macOS, con brew). También copia el
+normalizador y el vocabulario, instala la skill en `~/.agents/skills/dictation-vocabulary`
+(enlazada en `~/.claude/skills` si existe `~/.claude`), crea `~/.local/bin/voxtype-vocab` y
+configura voxtype para usar Groq con `voxtype config set`. Como tu terminal no es interactiva,
+te avisará de que falta la key: es lo esperado.
+
+✔ Acaba con «Hecho.». Si avisa de que `~/.local/bin` no está en el PATH, añádelo al
+`~/.zshrc` (macOS) o `~/.bashrc` de la persona.
+
+**4. API key de Groq (lo hace la persona)**
+
+Pídele que:
+
+1. Entre en https://console.groq.com, cree una cuenta gratuita y genere una key en
+   https://console.groq.com/keys.
+2. Ejecute **en su propia terminal** (no en tu chat):
+   ```bash
+   ~/voxtype-dictado/install.sh --key
+   ```
+   y pegue la key cuando se la pida. No se verá al escribirla.
+
+✔ El script imprime «Groq responde: …» con una frase limpia.
+
+**5. Dar la skill a tu agente**
+
+- Claude Code lee `~/.claude/skills`; el instalador ya la ha enlazado ahí.
+- Otros agentes: comprueba en su documentación de qué carpeta leen las skills. Si no es
+  `~/.agents/skills`, crea un enlace simbólico a `~/.agents/skills/dictation-vocabulary`.
+
+✔ Tu agente encuentra la skill `dictation-vocabulary`.
+
+**6. Añadir la regla a las instrucciones globales del agente**
+
+Añade el contenido de `AGENTS-snippet.md` al fichero de instrucciones globales del agente que
+usa la persona (por ejemplo `~/.claude/CLAUDE.md` en Claude Code, o el `AGENTS.md` global de tu
+agente). Sin esta regla el agente no sabrá que tiene que aprender palabras nuevas.
+
+✔ La regla aparece una sola vez en ese fichero.
+
+**7. Comprobar**
+
+```bash
+voxtype-vocab list   # contexto, vocabulario y sustituciones
+for k in whisper.mode whisper.remote_endpoint whisper.remote_model whisper.language output.post_process.command; do
+  printf '%s = ' "$k"; voxtype config get "$k"
+done
+```
+
+Esperado: `remote`, `https://api.groq.com/openai`, `whisper-large-v3`, `es` y la ruta a
+`normalize-es.sh`. No ejecutes `voxtype config get` sin clave: imprime la API key.
+
+Pide a la persona que dicte una frase con la tecla en cualquier campo de texto.
+
+✔ El texto aparece escrito y puntuado. Si no aparece nada en macOS, casi siempre faltan los
+permisos de Accesibilidad o Monitorización de entrada: después de darlos, reinicia voxtype.
+
+**8. Resumen para la persona**
+
+Dile qué se ha instalado, dónde está la copia de `config.toml` (`config.toml.bak-*`), qué
+pasos ha hecho ella, y que puede editar la línea `# contexto:` de `vocabulary.txt` si no
+habla de desarrollo de software (sección «Personalizar»).
+
+---
+
+## Para humanos
+
+### 1. Cuenta de Groq (gratis)
+
+1. Regístrate en https://console.groq.com.
+2. En **API Keys** (https://console.groq.com/keys), crea una key y cópiala. Empieza por `gsk_`.
+
+El plan gratuito tiene límites de peticiones y de minutos de audio
+(https://console.groq.com/docs/rate-limits). Para dictar mensajes suele sobrar. Si un día los
+superas, voxtype dará error hasta que se renueve el cupo.
+
+### 2. Instalar voxtype
+
+**macOS** (13 Ventura o superior):
+
+```bash
+brew install --cask peteonrails/voxtype/voxtype
+```
+
+Abre voxtype y sigue el asistente. Tendrás que dar permisos de **Micrófono**,
+**Accesibilidad** y **Monitorización de entrada** en Ajustes del Sistema → Privacidad y
+seguridad, y elegir la tecla de dictado.
+
+**Linux**: sigue https://voxtype.io.
+
+### 3. Instalar este flujo
+
+```bash
+git clone https://github.com/almaro90/voxtype-dictado.git ~/voxtype-dictado
+cd ~/voxtype-dictado
+./install.sh
+```
+
+Cuando te lo pida, pega la key de Groq. Al final verás una frase de prueba limpiada por Groq.
+
+### 4. Usarlo
+
+Mantén pulsada la tecla, habla y suelta. El texto se escribe donde esté el cursor.
+
+### 5. El diccionario
+
+Si usas un agente de IA (Claude Code, Codex…), añade a sus instrucciones globales la regla de
+`AGENTS-snippet.md`. Cuando dictes algo y salga mal un nombre, el agente lo apuntará solo y te
+lo dirá en una línea. También puedes hacerlo tú:
+
+```bash
+voxtype-vocab add "Loom" --heard "lum"             # «lum» se cambiará siempre por Loom
+voxtype-vocab add "Claude" --heard "cloud" --no-replace   # solo como pista, porque «cloud» es una palabra real
+voxtype-vocab list                                  # ver lo aprendido
+voxtype-vocab undo                                  # deshacer lo último
+```
+
+El vocabulario está en `~/.config/voxtype/vocabulary.txt`, el más nuevo primero.
+
+### Personalizar
+
+- **De qué sueles hablar**: edita la línea `# contexto: desarrollo de software` de
+  `~/.config/voxtype/vocabulary.txt` (por ejemplo, `# contexto: pediatría y educación
+  infantil`) y ejecuta `voxtype-vocab sync`. La usan tanto Whisper como el normalizador.
+- **Modelo del normalizador**: por defecto es `openai/gpt-oss-20b` en Groq. Para cambiarlo,
+  define `VOXTYPE_NORMALIZE_MODEL`.
+- **Desactivar la limpieza**: `voxtype config unset output.post_process.command`.
+
+### Privacidad
+
+El audio y el texto se envían a Groq. No dictes nada que no mandarías a un servicio externo.
+Si quieres todo en local, voxtype también puede transcribir en tu máquina (`whisper.mode =
+local` con un modelo descargado; mira la documentación de voxtype), pero el normalizador
+seguiría llamando a Groq, así que tendrías que desactivarlo.
+
+La key se guarda en `~/.config/voxtype/config.toml` con permisos 600. Si sincronizas tus
+dotfiles (chezmoi, git…), no subas ese fichero a un repo público.
+
+### Problemas frecuentes
+
+| Síntoma | Causa probable |
+|---|---|
+| No se escribe nada (macOS) | Faltan permisos de Accesibilidad o Monitorización de entrada. Dalos y reinicia voxtype |
+| Sale texto sin puntuar ni limpiar | Ha fallado el normalizador: key, conexión o límite de Groq. Prueba `echo "hola eh que tal" \| ~/.config/voxtype/normalize-es.sh` |
+| `voxtype-vocab: necesita Python 3.11` | `brew install python` y vuelve a ejecutar `./install.sh` |
+| `voxtype-vocab: command not found` | Añade `~/.local/bin` al PATH |
+| Un cambio del diccionario no se aplica | `voxtype-vocab restart`, o cierra y abre voxtype |
+
+### Actualizar y desinstalar
+
+- Actualizar: `cd ~/voxtype-dictado && git pull && ./install.sh`.
+- Desinstalar el flujo: borra `~/.agents/skills/dictation-vocabulary`,
+  `~/.claude/skills/dictation-vocabulary`, `~/.local/bin/voxtype-vocab` y
+  `~/.config/voxtype/normalize-es.sh`, y restaura un `config.toml.bak-*`. Para quitar voxtype
+  en macOS: `brew uninstall --cask voxtype`.

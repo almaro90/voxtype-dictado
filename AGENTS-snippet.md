@@ -1,0 +1,1 @@
+- My messages are usually dictated with voxtype. When a term is clearly a speech-to-text mistranscription (you reinterpreted it from context, or I corrected it), use the `dictation-vocabulary` skill to record it without asking, then mention it in one line.

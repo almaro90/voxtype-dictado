@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Teach voxtype the right spelling of mistranscribed terms.
+
+  voxtype-vocab add TERM [--heard WRONG]... [--no-replace]
+  voxtype-vocab undo
+  voxtype-vocab list
+  voxtype-vocab sync      regenerate the Whisper prompt from vocabulary.txt
+  voxtype-vocab restart   restart the voxtype daemon once it is idle
+
+`add` puts TERM in vocabulary.txt (Whisper initial_prompt + LLM normalizer)
+and, unless --no-replace, maps each WRONG form to TERM in [text] replacements.
+Every change is logged so `undo` can revert the latest one.
+
+Works on Linux (systemd) and macOS (launchd). Needs Python 3.11+.
+"""
+import sys
+
+if sys.version_info < (3, 11):
+    sys.exit("voxtype-vocab: necesita Python 3.11 o superior "
+             f"(tienes {sys.version.split()[0]}). En macOS: brew install python")
+
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import time
+import tomllib
+from datetime import datetime, timezone
+from pathlib import Path
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxtype"
+CONFIG = CONFIG_DIR / "config.toml"
+VOCAB = CONFIG_DIR / "vocabulary.txt"
+HISTORY = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "voxtype-vocab" / "history.jsonl"
+
+DEFAULT_CONTEXT = "desarrollo de software"
+# Groq caps the Whisper prompt at 224 tokens; stay well below it
+PROMPT_MAX_CHARS = 600
+RESTART_WAIT_SECS = 30
+
+
+def fail(message):
+    print(f"voxtype-vocab: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+# --- vocabulary.txt -------------------------------------------------------
+
+def read_vocab():
+    lines = VOCAB.read_text().splitlines() if VOCAB.exists() else []
+    header = [line for line in lines if line.lstrip().startswith("#")]
+    terms = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+    return header, terms
+
+
+def write_vocab(header, terms):
+    VOCAB.write_text("\n".join(header + terms) + "\n")
+
+
+def find_term(terms, term):
+    lowered = term.casefold()
+    return next((t for t in terms if t.casefold() == lowered), None)
+
+
+def read_context(header):
+    """`# contexto: ...` in vocabulary.txt says what the user usually talks about."""
+    for line in header:
+        match = re.match(r"^\s*#\s*contexto\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return DEFAULT_CONTEXT
+
+
+# --- config.toml ----------------------------------------------------------
+
+def toml_str(value):
+    # JSON string escapes are valid TOML basic-string escapes
+    return json.dumps(value, ensure_ascii=False)
+
+
+def section_bounds(lines, section):
+    start = next((i for i, line in enumerate(lines) if line.strip() == f"[{section}]"), None)
+    if start is None:
+        return None, None
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^\s*\[", lines[i])), len(lines))
+    return start, end
+
+
+def drop_section(text, section):
+    """Remove a [section] table (header and body), e.g. [text.replacements]."""
+    lines = text.splitlines(keepends=True)
+    start, end = section_bounds(lines, section)
+    if start is None:
+        return text
+    return "".join(lines[:start] + lines[end:])
+
+
+def set_key_line(text, section, key, rendered):
+    """Replace `key = ...` inside [section], insert it, or append the section."""
+    lines = text.splitlines(keepends=True)
+    new_line = f"{key} = {rendered}\n"
+    start, end = section_bounds(lines, section)
+    if start is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        return "".join(lines) + f"\n[{section}]\n{new_line}"
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for i in range(start + 1, end):
+        if pattern.match(lines[i]):
+            lines[i] = new_line
+            break
+    else:
+        lines.insert(start + 1, new_line)
+    return "".join(lines)
+
+
+def read_config():
+    text = CONFIG.read_text()
+    data = tomllib.loads(text)
+    replacements = data.get("text", {}).get("replacements", {})
+    return text, data, dict(replacements)
+
+
+def build_prompt(terms, context):
+    prefix = f"Dictado en español de España sobre {context}, con términos en inglés: "
+    chosen = []
+    for term in terms:
+        if len(prefix + ", ".join(chosen + [term]) + ".") > PROMPT_MAX_CHARS:
+            break
+        chosen.append(term)
+    return prefix + ", ".join(chosen) + ".", len(terms) - len(chosen)
+
+
+def write_config(replacements, terms, context):
+    """Rewrite replacements and initial_prompt; return True if the file changed."""
+    text, _, _ = read_config()
+    prompt, dropped = build_prompt(terms, context)
+    rendered = "{ " + ", ".join(f"{toml_str(k)} = {toml_str(v)}" for k, v in replacements.items()) + " }"
+    # `voxtype config set text.replacements.x` writes a [text.replacements] table;
+    # fold it into one inline table so there is a single place to edit
+    new_text = drop_section(text, "text.replacements")
+    new_text = set_key_line(new_text, "text", "replacements", rendered)
+    new_text = set_key_line(new_text, "whisper", "initial_prompt", toml_str(prompt))
+
+    parsed = tomllib.loads(new_text)
+    if parsed["text"].get("replacements", {}) != replacements or parsed["whisper"].get("initial_prompt") != prompt:
+        fail("la config generada no coincide con lo esperado; no se ha escrito nada")
+    if dropped:
+        print(f"Aviso: {dropped} término(s) no caben en el prompt de Whisper; el LLM sí los recibe.")
+    if new_text == text:
+        return False
+    tmp = CONFIG.with_suffix(".toml.tmp")
+    tmp.write_text(new_text)
+    os.chmod(tmp, CONFIG.stat().st_mode & 0o777)
+    os.replace(tmp, CONFIG)
+    return True
+
+
+# --- side effects ---------------------------------------------------------
+
+def daemon_state():
+    if shutil.which("voxtype") is None:
+        return "idle"
+    result = subprocess.run(["voxtype", "status"], capture_output=True, text=True)
+    return result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "idle"
+
+
+def launchd_label():
+    result = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        label = line.split("\t")[-1].strip()
+        if "voxtype" in label.lower():
+            return label
+    return None
+
+
+def restart_daemon():
+    if os.environ.get("VOXTYPE_VOCAB_NO_RESTART"):
+        return "reinicio omitido"
+    deadline = time.time() + RESTART_WAIT_SECS
+    while daemon_state() not in ("idle", "") and time.time() < deadline:
+        time.sleep(1)
+    if daemon_state() not in ("idle", ""):
+        return "voxtype ocupado: reinícialo luego con `voxtype-vocab restart`"
+
+    if platform.system() == "Darwin":
+        label = launchd_label()
+        if label:
+            subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"], check=False)
+            return "voxtype reiniciado"
+        return "reinicia voxtype (sal de la app y ábrela otra vez) para aplicar el cambio"
+
+    if shutil.which("systemctl"):
+        active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "voxtype"]).returncode == 0
+        if active:
+            subprocess.run(["systemctl", "--user", "restart", "voxtype"], check=True)
+            return "voxtype reiniciado"
+    return "voxtype no está en marcha como servicio: reinícialo a mano para aplicar el cambio"
+
+
+def sync_chezmoi():
+    if os.environ.get("VOXTYPE_VOCAB_NO_CHEZMOI") or shutil.which("chezmoi") is None:
+        return ""
+    if subprocess.run(["chezmoi", "source-path", str(CONFIG)], capture_output=True).returncode != 0:
+        return ""
+    result = subprocess.run(["chezmoi", "add", str(CONFIG), str(VOCAB)], capture_output=True, text=True)
+    if result.returncode != 0:
+        return f"chezmoi no se pudo sincronizar: {result.stderr.strip()}"
+    return "chezmoi sincronizado (sin commit)"
+
+
+def apply(replacements, terms, header):
+    write_vocab(header, terms)
+    config_changed = write_config(replacements, terms, read_context(header))
+    notes = [restart_daemon() if config_changed else "", sync_chezmoi()]
+    return ". ".join(n for n in notes if n)
+
+
+# --- history --------------------------------------------------------------
+
+def read_history():
+    if not HISTORY.exists():
+        return []
+    return [json.loads(line) for line in HISTORY.read_text().splitlines() if line.strip()]
+
+
+def write_history(entries):
+    HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries))
+
+
+# --- commands -------------------------------------------------------------
+
+def cmd_add(args):
+    term = " ".join(args.term.split())
+    if not term:
+        fail("término vacío")
+    header, terms = read_vocab()
+    _, _, replacements = read_config()
+    if term.casefold() in replacements:
+        fail(f"«{term}» ya está registrado como mala transcripción de «{replacements[term.casefold()]}»")
+
+    term_added = find_term(terms, term) is None
+    if term_added:
+        terms.insert(0, term)
+
+    changed = []
+    if not args.no_replace:
+        for heard in args.heard:
+            heard = " ".join(heard.casefold().split())
+            if not heard or heard == term.casefold() or replacements.get(heard) == term:
+                continue
+            changed.append({"heard": heard, "previous": replacements.get(heard)})
+            replacements[heard] = term
+
+    if not term_added and not changed:
+        print(f"Sin cambios: «{term}» ya estaba en el vocabulario de voxtype.")
+        return
+
+    notes = apply(replacements, terms, header)
+    history = read_history()
+    history.append({
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "term": term,
+        "term_added": term_added,
+        "replacements": changed,
+    })
+    write_history(history)
+
+    parts = []
+    if term_added:
+        parts.append(f"«{term}» al vocabulario")
+    parts += [f"sustitución «{c['heard']}» → «{term}»" for c in changed]
+    print(f"Añadido a voxtype: {', '.join(parts)}." + (f" {notes}." if notes else "") + " Deshacer: voxtype-vocab undo")
+
+
+def cmd_undo(_args):
+    history = read_history()
+    if not history:
+        fail("no hay nada que deshacer")
+    entry = history.pop()
+    header, terms = read_vocab()
+    _, _, replacements = read_config()
+
+    if entry["term_added"]:
+        terms = [t for t in terms if t != entry["term"]]
+    for change in reversed(entry["replacements"]):
+        if change["previous"] is None:
+            replacements.pop(change["heard"], None)
+        else:
+            replacements[change["heard"]] = change["previous"]
+
+    notes = apply(replacements, terms, header)
+    write_history(history)
+
+    parts = []
+    if entry["term_added"]:
+        parts.append(f"«{entry['term']}» del vocabulario")
+    parts += [f"sustitución «{c['heard']}»" for c in entry["replacements"]]
+    print(f"Deshecho en voxtype: {', '.join(parts)}." + (f" {notes}." if notes else ""))
+
+
+def cmd_list(_args):
+    header, terms = read_vocab()
+    _, _, replacements = read_config()
+    print(f"Contexto: {read_context(header)}")
+    print(f"Vocabulario ({len(terms)}): {', '.join(terms)}")
+    print("Sustituciones:")
+    for heard, term in replacements.items():
+        print(f"  «{heard}» → «{term}»")
+    history = read_history()[-10:]
+    if history:
+        print("Últimos aprendizajes:")
+        for e in history:
+            heard = ", ".join(c["heard"] for c in e["replacements"]) or "-"
+            print(f"  {e['ts']}  {e['term']}  (oído: {heard})")
+
+
+def cmd_sync(_args):
+    header, terms = read_vocab()
+    _, _, replacements = read_config()
+    notes = apply(replacements, terms, header)
+    print("Prompt de Whisper y sustituciones al día." + (f" {notes}." if notes else ""))
+
+
+def cmd_restart(_args):
+    print(restart_daemon())
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="voxtype-vocab", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    add = sub.add_parser("add", help="aprender un término")
+    add.add_argument("term", help="ortografía correcta, p. ej. Loom")
+    add.add_argument("--heard", action="append", default=[], help="cómo lo transcribió voxtype, p. ej. lum")
+    add.add_argument("--no-replace", action="store_true", help="solo vocabulario, sin sustitución fija")
+    add.set_defaults(func=cmd_add)
+    sub.add_parser("undo", help="deshacer el último aprendizaje").set_defaults(func=cmd_undo)
+    sub.add_parser("list", help="ver vocabulario y sustituciones").set_defaults(func=cmd_list)
+    sub.add_parser("sync", help="regenerar el prompt de Whisper desde vocabulary.txt").set_defaults(func=cmd_sync)
+    sub.add_parser("restart", help="reiniciar voxtype cuando esté libre").set_defaults(func=cmd_restart)
+    args = parser.parse_args()
+    if not CONFIG.exists():
+        fail(f"no existe {CONFIG}; ejecuta antes `voxtype configure` o el install.sh")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
