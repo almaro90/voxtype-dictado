@@ -169,7 +169,9 @@ permisos de Accesibilidad o Monitorización de entrada: después de darlos, rein
 
 Dile qué se ha instalado, dónde está la copia de `config.toml` (`config.toml.bak-*`), qué
 pasos ha hecho ella, y que puede editar la línea `# contexto:` de `vocabulary.txt` si no
-habla de desarrollo de software (sección «Personalizar»).
+habla de desarrollo de software (sección «Personalizar»). Si pide otro modelo, proveedor o
+reglas para la limpieza del texto, sigue «Personalizar el normalizador»: se hace con ficheros
+en `~/.config/voxtype/`, nunca editando `normalize-es.sh`, porque `install.sh` lo sobrescribe.
 
 ---
 
@@ -236,9 +238,68 @@ El vocabulario está en `~/.config/voxtype/vocabulary.txt`, el más nuevo primer
 - **De qué sueles hablar**: edita la línea `# contexto: desarrollo de software` de
   `~/.config/voxtype/vocabulary.txt` (por ejemplo, `# contexto: pediatría y educación
   infantil`) y ejecuta `voxtype-vocab sync`. La usan tanto Whisper como el normalizador.
-- **Modelo del normalizador**: por defecto es `openai/gpt-oss-20b` en Groq. Para cambiarlo,
-  define `VOXTYPE_NORMALIZE_MODEL`.
 - **Desactivar la limpieza**: `voxtype config unset output.post_process.command`.
+- **Reactivarla** (por ejemplo, tras instalar con `--local`):
+  `voxtype config set output.post_process.command ~/.config/voxtype/normalize-es.sh`.
+
+### Personalizar el normalizador (el LLM que limpia el texto)
+
+Después de transcribir, `normalize-es.sh` manda el texto a un LLM que quita muletillas, pone
+la puntuación y escribe bien los términos del vocabulario. Por defecto usa
+`openai/gpt-oss-20b` en Groq con la misma key que la transcripción. Todo se cambia con
+ficheros en `~/.config/voxtype/`, sin tocar el script. Las variables de entorno no sirven,
+porque voxtype no hereda las de tu terminal.
+
+**Modelo y proveedor**: crea `~/.config/voxtype/normalize.env`. Vale cualquier API compatible
+con la de chat completions de OpenAI.
+
+```bash
+# Otro modelo de Groq (lista en https://console.groq.com/docs/models)
+NORMALIZE_MODEL=openai/gpt-oss-120b
+
+# OpenRouter, OpenAI u otro proveedor: endpoint completo y su propia key
+# NORMALIZE_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
+# NORMALIZE_MODEL=<proveedor/modelo>
+# NORMALIZE_API_KEY=<tu key de ese proveedor>
+
+# Un LLM en tu propio ordenador con Ollama: sin key y sin que salga nada de tu máquina
+# NORMALIZE_ENDPOINT=http://localhost:11434/v1/chat/completions
+# NORMALIZE_MODEL=llama3.2
+# NORMALIZE_TIMEOUT=20
+
+# Esfuerzo de razonamiento: "low" por defecto con los modelos gpt-oss; vacío lo desactiva
+# NORMALIZE_REASONING_EFFORT=low
+```
+
+Si pones una key, protege el fichero con `chmod 600 ~/.config/voxtype/normalize.env`.
+
+**Tiempo de espera**: `NORMALIZE_TIMEOUT` (7 s por defecto) es lo que el script espera al LLM.
+Si lo subes, sube también el de voxtype para que no corte antes, siempre un segundo por
+encima: `voxtype config set output.post_process.timeout_ms 21000`. Si el LLM no contesta a
+tiempo, voxtype escribe el texto sin limpiar.
+
+**Reglas propias**: escribe una regla por línea en `~/.config/voxtype/normalize-rules.txt`.
+Se añaden al final del prompt y mandan sobre las de serie. Por ejemplo:
+
+```
+- Escribe los números siempre en cifras.
+- Usa «tú», nunca «usted».
+- Cuando diga «punto y aparte», pon un salto de línea.
+```
+
+**Prompt completo**: si quieres sustituir todas las reglas, escribe tu prompt en
+`~/.config/voxtype/normalize-prompt.txt`, partiendo del que hay en `normalize-es.sh`.
+`__CONTEXT__` se cambia por la línea `# contexto:` de tu vocabulario. El vocabulario conocido
+y las reglas propias se siguen añadiendo al final.
+
+**Probar un cambio** sin dictar:
+
+```bash
+echo "eh bueno pues mañana a las cinco o sea revisamos el el informe" | ~/.config/voxtype/normalize-es.sh; echo
+```
+
+Si da un error o no imprime nada, revisa la conexión, la key, el endpoint y el nombre del modelo. Los cambios en estos
+ficheros se aplican en el siguiente dictado, sin reiniciar voxtype.
 
 ### Privacidad
 

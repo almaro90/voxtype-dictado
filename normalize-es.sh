@@ -1,22 +1,39 @@
 #!/usr/bin/env bash
-# Voxtype post-process: normalize Spanish (Spain) dictation via Groq.
+# Voxtype post-process: normalize Spanish (Spain) dictation with an LLM
+# (Groq by default; any OpenAI-compatible chat completions API works).
 # Reads raw transcription on stdin, prints cleaned text on stdout.
 # Any failure exits non-zero so voxtype falls back to the original text.
 # Works with the bash 3.2 that ships with macOS and with BSD sed.
+#
+# Customize in ~/.config/voxtype/ (see README, "Personalizar el normalizador"):
+#   normalize.env          NORMALIZE_MODEL, NORMALIZE_ENDPOINT, NORMALIZE_API_KEY, NORMALIZE_TIMEOUT
+#   normalize-rules.txt    extra rules appended to the built-in prompt
+#   normalize-prompt.txt   replaces the built-in prompt entirely
 set -euo pipefail
 
-MODEL="${VOXTYPE_NORMALIZE_MODEL:-openai/gpt-oss-20b}"
-ENDPOINT="${VOXTYPE_NORMALIZE_ENDPOINT:-https://api.groq.com/openai/v1/chat/completions}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/voxtype"
 VOCAB_FILE="$CONFIG_DIR/vocabulary.txt"
+GROQ_ENDPOINT="https://api.groq.com/openai/v1/chat/completions"
 
-# The daemon may not inherit your shell env (launchd on macOS), so fall back
-# to the key voxtype itself uses in config.toml
-KEY="${GROQ_API_KEY:-${VOXTYPE_WHISPER_API_KEY:-}}"
-if [[ -z "$KEY" ]]; then
-  KEY=$(sed -nE 's/^[[:space:]]*remote_api_key[[:space:]]*=[[:space:]]*"(.*)"/\1/p' "$CONFIG_DIR/config.toml" | head -n 1)
+# A file, not env vars: the daemon does not inherit your shell (launchd on macOS)
+if [[ -f "$CONFIG_DIR/normalize.env" ]]; then
+  # shellcheck source=/dev/null
+  . "$CONFIG_DIR/normalize.env"
 fi
-[[ -n "$KEY" ]] || exit 1
+MODEL="${NORMALIZE_MODEL:-${VOXTYPE_NORMALIZE_MODEL:-openai/gpt-oss-20b}}"
+ENDPOINT="${NORMALIZE_ENDPOINT:-${VOXTYPE_NORMALIZE_ENDPOINT:-$GROQ_ENDPOINT}}"
+TIMEOUT="${NORMALIZE_TIMEOUT:-7}"
+
+KEY="${NORMALIZE_API_KEY:-}"
+if [[ -z "$KEY" && "$ENDPOINT" == "$GROQ_ENDPOINT" ]]; then
+  # Default provider: reuse the Groq key voxtype itself uses
+  KEY="${GROQ_API_KEY:-${VOXTYPE_WHISPER_API_KEY:-}}"
+  if [[ -z "$KEY" ]]; then
+    KEY=$(sed -nE 's/^[[:space:]]*remote_api_key[[:space:]]*=[[:space:]]*"(.*)"/\1/p' "$CONFIG_DIR/config.toml" | head -n 1)
+  fi
+  [[ -n "$KEY" ]] || exit 1
+fi
+# Other endpoints without a key (e.g. Ollama on localhost) are called without auth
 
 INPUT=$(cat)
 [[ -n "${INPUT//[[:space:]]/}" ]] || exit 1
@@ -54,7 +71,14 @@ Creo que el martes subimos la versión nueva.
 <dictado>eh estoy mirando el el endpoint ese que, o sea, devuelve un error quinientos</dictado>
 Estoy mirando el endpoint ese que devuelve un error 500.
 EOF
-SYSTEM="${SYSTEM/__CONTEXT__/$CONTEXT}"
+if [[ -s "$CONFIG_DIR/normalize-prompt.txt" ]]; then
+  SYSTEM=$(cat "$CONFIG_DIR/normalize-prompt.txt")
+fi
+SYSTEM="${SYSTEM//__CONTEXT__/$CONTEXT}"
+
+if [[ -s "$CONFIG_DIR/normalize-rules.txt" ]]; then
+  SYSTEM+=$'\n\n'"Reglas adicionales de esta persona (tienen prioridad sobre las anteriores):"$'\n'"$(cat "$CONFIG_DIR/normalize-rules.txt")"
+fi
 
 VOCAB=$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$VOCAB_FILE" 2>/dev/null | paste -sd ',' - | sed 's/,/, /g' || true)
 if [[ -n "$VOCAB" ]]; then
@@ -68,24 +92,38 @@ if [[ -n "${VOXTYPE_CONTEXT:-}" ]]; then
 ${USER_MSG}"
 fi
 
+# reasoning_effort only makes sense for reasoning models (the default gpt-oss);
+# include_reasoning is Groq-only. Other models/providers get a plain request.
+EFFORT="${NORMALIZE_REASONING_EFFORT-}"
+if [[ -z "${NORMALIZE_REASONING_EFFORT+set}" && "$MODEL" == openai/gpt-oss-* ]]; then
+  EFFORT="low"
+fi
+IS_GROQ=false
+[[ "$ENDPOINT" == "$GROQ_ENDPOINT" ]] && IS_GROQ=true
+
 PAYLOAD=$(jq -n \
   --arg model "$MODEL" \
   --arg system "$SYSTEM" \
   --arg user "$USER_MSG" \
+  --arg effort "$EFFORT" \
+  --argjson groq "$IS_GROQ" \
   '{
     model: $model,
     messages: [{role: "system", content: $system}, {role: "user", content: $user}],
     temperature: 0.2,
-    max_completion_tokens: 2048,
-    reasoning_effort: "low",
-    include_reasoning: false
-  }')
+    max_completion_tokens: 2048
+  }
+  + (if $effort != "" then {reasoning_effort: $effort} else {} end)
+  + (if $effort != "" and $groq then {include_reasoning: false} else {} end)')
 
-# Key goes through a header file on stdin so it never shows up in `ps`
-RESPONSE=$(printf 'Authorization: Bearer %s\n' "$KEY" | curl -sS -f --max-time 7 "$ENDPOINT" \
-  -H @- \
-  -H "Content-Type: application/json" \
-  -d "$PAYLOAD")
+# The key goes in a header read from stdin, so it never shows up in `ps`
+RESPONSE=$(
+  if [[ -n "$KEY" ]]; then printf 'Authorization: Bearer %s\n' "$KEY"; fi |
+    curl -sS -f --max-time "$TIMEOUT" "$ENDPOINT" \
+      -H @- \
+      -H "Content-Type: application/json" \
+      -d "$PAYLOAD"
+)
 
 OUTPUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE" \
   | sed -E 's#</?dictado>##g')
