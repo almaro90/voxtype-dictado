@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install the voxtype + Groq dictation workflow (macOS or Linux).
 #
-#   ./install.sh          install or update everything; asks for the Groq key if missing
+#   ./install.sh          install or update everything with Groq; asks for the key if missing
+#   ./install.sh --local  no Groq account: transcribe on this machine, no LLM cleanup
 #   ./install.sh --key    only ask for (or replace) the Groq API key
 #
 # Safe to re-run: it backs up config.toml, keeps your vocabulary.txt and only
@@ -162,6 +163,20 @@ configure_voxtype() {
   chmod 600 "$CONFIG"
 }
 
+# No Groq: keep the model the voxtype wizard downloaded, drop our LLM cleanup.
+# The dictionary still works through initial_prompt and replacements.
+configure_voxtype_local() {
+  say "Configurando voxtype en local (sin Groq)…"
+  voxtype config set engine whisper >/dev/null
+  voxtype config set whisper.mode local >/dev/null
+  voxtype config set whisper.language es >/dev/null
+  if [[ "$(voxtype config get output.post_process.command 2>/dev/null)" == "$CONFIG_DIR/normalize-es.sh" ]]; then
+    voxtype config unset output.post_process.command >/dev/null
+  fi
+  VOXTYPE_VOCAB_NO_RESTART=1 "$BIN_DIR/voxtype-vocab" sync
+  say "Modelo local actual: $(voxtype config get whisper.model 2>/dev/null || echo '?'). Comprueba que está descargado con \`voxtype info models\`."
+}
+
 smoke_test() {
   has_key || return 0
   say "Probando el normalizador con Groq…"
@@ -184,6 +199,12 @@ fi
 install_deps
 ensure_config
 install_files
+if [[ "${1:-}" == "--local" ]]; then
+  configure_voxtype_local
+  restart_voxtype
+  say "Hecho (modo local). Si más adelante creas la cuenta de Groq, ejecuta ./install.sh sin --local."
+  exit 0
+fi
 configure_voxtype
 has_key || ask_key
 smoke_test

@@ -20,6 +20,23 @@ tecla ─► voxtype graba ─► Groq Whisper large-v3 ─► normalizador (LLM
 
 Cada persona empieza con un vocabulario mínimo y genérico, que va creciendo con su uso.
 
+### ¿Hace falta una cuenta de Groq?
+
+**No, es opcional, pero sí recomendable.** voxtype puede transcribir en tu propio ordenador.
+Groq es un servicio en la nube con un plan gratuito que mejora bastante el resultado:
+
+| | Con Groq (recomendado) | Sin Groq (`--local`) |
+|---|---|---|
+| Cuenta | Gratuita en console.groq.com | Ninguna |
+| Transcripción | Whisper large-v3 en la nube: rápida y precisa en cualquier ordenador | Modelo Whisper en tu máquina: la calidad y la velocidad dependen del modelo y del ordenador |
+| Limpieza del texto (muletillas, repeticiones, puntuación) | Sí, con un LLM en Groq | No: el texto sale tal cual lo transcribe Whisper |
+| Diccionario que aprende | Sí: pista para Whisper, sustituciones y normalizador | Sí: pista para Whisper y sustituciones |
+| Privacidad | El audio y el texto se envían a Groq | Nada sale de tu ordenador |
+| Sin conexión | No funciona | Funciona |
+
+Puedes empezar sin cuenta y pasarte a Groq más adelante con solo volver a ejecutar
+`./install.sh` (sin `--local`), o al revés.
+
 | Fichero | Qué es |
 |---|---|
 | `install.sh` | Instalador. Se puede volver a ejecutar sin problema: hace copia de `config.toml` y conserva tu vocabulario |
@@ -49,6 +66,15 @@ un criterio de éxito: no pases al siguiente sin cumplirlo. Al terminar, haz un 
   verificados. Compruébalos con `voxtype config schema` y `voxtype config get` y, si algo no
   coincide, díselo a la persona en vez de inventar claves.
 
+**0. Preguntar a la persona si quiere usar Groq**
+
+Explícale en dos líneas la tabla «¿Hace falta una cuenta de Groq?»: Groq es opcional, gratuito
+y recomendable (mejor transcripción y limpieza del texto); sin Groq todo se queda en su
+ordenador pero el texto sale sin limpiar. Recomienda Groq salvo que le preocupe la privacidad
+o quiera dictar sin conexión.
+
+✔ Sabes si la instalación es **con Groq** o **local**. En modo local, sáltate el paso 4.
+
 **1. Clonar el repo**
 
 ```bash
@@ -77,19 +103,21 @@ versiones actuales usan `~/.config/voxtype`.
 **3. Ejecutar el instalador**
 
 ```bash
-./install.sh
+./install.sh            # con Groq
+./install.sh --local    # sin Groq
 ```
 
 Instala `jq` y un Python 3.11 o superior si faltan (en macOS, con brew). También copia el
 normalizador y el vocabulario, instala la skill en `~/.agents/skills/dictation-vocabulary`
 (enlazada en `~/.claude/skills` si existe `~/.claude`), crea `~/.local/bin/voxtype-vocab` y
-configura voxtype para usar Groq con `voxtype config set`. Como tu terminal no es interactiva,
-te avisará de que falta la key: es lo esperado.
+configura voxtype con `voxtype config set`. Con Groq, como tu terminal no es interactiva, te
+avisará de que falta la key: es lo esperado. En modo local usa el modelo que descargó el
+asistente de voxtype (`voxtype info models` muestra los instalados) y no activa el normalizador.
 
 ✔ Acaba con «Hecho.». Si avisa de que `~/.local/bin` no está en el PATH, añádelo al
 `~/.zshrc` (macOS) o `~/.bashrc` de la persona.
 
-**4. API key de Groq (lo hace la persona)**
+**4. API key de Groq (lo hace la persona; solo con Groq)**
 
 Pídele que:
 
@@ -128,8 +156,9 @@ for k in whisper.mode whisper.remote_endpoint whisper.remote_model whisper.langu
 done
 ```
 
-Esperado: `remote`, `https://api.groq.com/openai`, `whisper-large-v3`, `es` y la ruta a
-`normalize-es.sh`. No ejecutes `voxtype config get` sin clave: imprime la API key.
+Esperado con Groq: `remote`, `https://api.groq.com/openai`, `whisper-large-v3`, `es` y la
+ruta a `normalize-es.sh`. En modo local: `whisper.mode` es `local`, `whisper.language` es `es`
+y `output.post_process.command` sale vacío. No ejecutes `voxtype config get` sin clave: imprime la API key.
 
 Pide a la persona que dicte una frase con la tecla en cualquier campo de texto.
 
@@ -146,7 +175,10 @@ habla de desarrollo de software (sección «Personalizar»).
 
 ## Para humanos
 
-### 1. Cuenta de Groq (gratis)
+### 1. Cuenta de Groq (opcional, recomendada)
+
+Si prefieres no crear cuenta, sáltate este paso y usa `./install.sh --local` en el paso 3.
+Las diferencias están en la tabla «¿Hace falta una cuenta de Groq?».
 
 1. Regístrate en https://console.groq.com.
 2. En **API Keys** (https://console.groq.com/keys), crea una key y cópiala. Empieza por `gsk_`.
@@ -174,10 +206,11 @@ seguridad, y elegir la tecla de dictado.
 ```bash
 git clone https://github.com/almaro90/voxtype-dictado.git ~/voxtype-dictado
 cd ~/voxtype-dictado
-./install.sh
+./install.sh            # con Groq
+./install.sh --local    # sin Groq
 ```
 
-Cuando te lo pida, pega la key de Groq. Al final verás una frase de prueba limpiada por Groq.
+Con Groq, pega la key cuando te la pida. Al final verás una frase de prueba limpiada por Groq.
 
 ### 4. Usarlo
 
@@ -209,10 +242,8 @@ El vocabulario está en `~/.config/voxtype/vocabulary.txt`, el más nuevo primer
 
 ### Privacidad
 
-El audio y el texto se envían a Groq. No dictes nada que no mandarías a un servicio externo.
-Si quieres todo en local, voxtype también puede transcribir en tu máquina (`whisper.mode =
-local` con un modelo descargado; mira la documentación de voxtype), pero el normalizador
-seguiría llamando a Groq, así que tendrías que desactivarlo.
+Con Groq, el audio y el texto se envían a Groq: no dictes nada que no mandarías a un servicio
+externo. Con `./install.sh --local` no sale nada de tu ordenador.
 
 La key se guarda en `~/.config/voxtype/config.toml` con permisos 600. Si sincronizas tus
 dotfiles (chezmoi, git…), no subas ese fichero a un repo público.
